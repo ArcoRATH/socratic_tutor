@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# Python hardware/cache
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+data/
+
+# Private notes / agent config
+plan.md
+AGENTS.md

@@ -1,0 +1,15 @@
+# Orchestration & LLM
+langgraph
+langchain-google-genai
+google-generativeai
+
+# Database & Vector Search
+sqlalchemy
+psycopg2-binary
+pgvector
+pydantic-settings
+
+# Extraction & Interface
+kreuzberg
+python-telegram-bot
+langchain-experimental
