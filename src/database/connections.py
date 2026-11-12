@@ -35,7 +35,8 @@ def get_db():
 
 def init_db():
     """
-    Creates the pgvector extension and all ORM tables.
+    Creates the pgvector extension and all ORM tables, then aligns the
+    document_chunks.embedding column to the configured vector dimension.
     Imports models lazily so models.py can reuse this module's Base
     without a circular import.
     """
@@ -44,3 +45,31 @@ def init_db():
     with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(bind=engine)
+    _align_embedding_dimension()
+
+
+def _align_embedding_dimension():
+    """
+    Idempotent column-type alignment: if document_chunks.embedding exists with
+    a dimension other than settings.EMBEDDING_DIMENSIONS (e.g. a pre-bge-m3
+    768-d database), recreate it as vector(N) USING NULL. Users, documents and
+    progress survive; only stale vectors are cleared.
+    """
+    from src.core.config import settings
+
+    target = settings.EMBEDDING_DIMENSIONS
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "SELECT format_type(atttypid, atttypmod) "
+            "FROM pg_attribute "
+            "WHERE attrelid = 'document_chunks'::regclass "
+            "AND attname = 'embedding' AND NOT attisdropped"
+        )).scalar()
+        if row is None or row == f"vector({target})":
+            return
+        print(f"Aligning document_chunks.embedding {row} -> vector({target}) "
+              f"(existing vectors cleared)", flush=True)
+        conn.execute(text(
+            f"ALTER TABLE document_chunks "
+            f"ALTER COLUMN embedding TYPE vector({target}) USING NULL"
+        ))

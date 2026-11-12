@@ -58,7 +58,7 @@ graph TD
     LLM -->|Lessons & Feedback| Bot
 ```
 
-**Ingestion pipeline** (`src/engine/`): Kreuzberg extraction → `RecursiveCharacterTextSplitter` (2200 chars / 200 overlap) → heuristic + LLM front/back-matter filter → batched embeddings (90/request, 429 backoff) → pgvector.
+**Ingestion pipeline** (`src/engine/`): Kreuzberg extraction → `RecursiveCharacterTextSplitter` (2200 chars / 200 overlap) → heuristic + LLM front/back-matter filter → batched embeddings (32/request, 429 backoff) → pgvector.
 
 **Learning graph** (`src/agents/graph.py`): an entry router sends each message to the right node — grading when a question is pending, teaching when a new section starts — and `advance`/`retry`/`complete` decisions are driven by mastery scores, not just correctness.
 
@@ -80,7 +80,7 @@ docker compose up --build
 
 The app container runs `src/main.py` → `init_db()` (creates the pgvector extension + all tables) → Telegram polling. The DB alone: `docker compose up -d db`.
 
-> ⚠️ **Free-tier reality:** ~20 `generate_content` requests/day on flash models. One teach→quiz turn costs 2–3 requests. Pro models are zero-quota on free keys — set `LLM_MODEL=gemini-3.1-pro-preview` in `.env` if your key has billing.
+> ⚠️ **Free-tier reality:** ~20 `generate_content` requests/day on flash models. One teach→quiz turn costs 2–3 requests. Pro models are zero-quota on free keys — set `LLM_MODEL=gemini-3.1-pro-preview` in `.env` if your key has billing. Embeddings no longer touch Gemini — they run on SiliconFlow's free `BAAI/bge-m3` (optional key).
 
 ## ⚙️ Configuration (`.env`)
 
@@ -89,7 +89,10 @@ The app container runs `src/main.py` → `init_db()` (creates the pgvector exten
 | `GEMINI_API_KEY` | — | Required. Gemini API key |
 | `TELEGRAM_BOT_TOKEN` | — | Required. Bot token from @BotFather |
 | `LLM_MODEL` | `gemini-3.5-flash` | Teaching/eval model (verified on free tier; JSON mode included) |
-| `EMBEDDING_MODEL` | `models/gemini-embedding-001` | Embedding model, pinned to 768 dims (must match `Vector(768)` in `models.py`) |
+| `EMBEDDING_MODEL` | `BAAI/bge-m3` | Embedding model on SiliconFlow (OpenAI-compatible), native 1024 dims (must match `Vector(1024)` in `models.py`; never send a `dimensions` request param — bge-m3 rejects it) |
+| `SILICONFLOW_API_KEY` | — | Optional. Embedding provider key (https://cloud.siliconflow.cn/account/ak); without it, sections are stored unembedded and teaching still works |
+| `EMBEDDING_BASE_URL` | `https://api.siliconflow.cn/v1` | OpenAI-compatible embeddings endpoint |
+| `EMBEDDING_DIMENSIONS` | `1024` | Vector column width; `init_db()` auto-aligns a mismatched column (clearing stale vectors) |
 | `DATABASE_URL` | points at `db` container | Postgres connection |
 | `MAX_EMBED_CHUNKS` | `30` | Max sections to embed per document; the rest are stored unembedded and remain teachable |
 | `LOG_LEVEL` / `DEBUG` | `INFO` / `False` | App settings |

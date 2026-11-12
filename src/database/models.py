@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
 
+from src.core.config import settings
 from src.database.connections import Base
 
 class User(Base):
@@ -34,8 +35,8 @@ class DocumentChunk(Base):
     content = Column(Text, nullable=False)
     chunk_index = Column(Integer, nullable=False)
     
-    # pgvector column: Gemini 1.5 Pro text-embedding-004 uses 768 dimensions
-    embedding = Column(Vector(768)) 
+    # pgvector column; dimension pinned via EMBEDDING_DIMENSIONS (bge-m3 = 1024)
+    embedding = Column(Vector(settings.EMBEDDING_DIMENSIONS))
 
     document = relationship("Document", back_populates="chunks")
 

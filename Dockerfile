@@ -14,8 +14,10 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # 3. Install Python dependencies
+# Override with --build-arg PIP_INDEX_URL=<mirror> when pypi.org is unreliable.
+ARG PIP_INDEX_URL=https://pypi.org/simple
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --retries 10 --timeout 120 --index-url ${PIP_INDEX_URL} -r requirements.txt
 
 # 4. Copy project files
 COPY . .

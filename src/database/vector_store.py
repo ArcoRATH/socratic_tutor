@@ -1,46 +1,50 @@
 import time
 
-import google.generativeai as genai
-from sqlalchemy import select, and_
+from openai import OpenAI
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from src.database.models import DocumentChunk
 from src.core.config import settings
 
-# Configure Gemini for Embeddings
-genai.configure(api_key=settings.GEMINI_API_KEY)
+_client: Optional[OpenAI] = None
+
+
+def _get_client() -> Optional[OpenAI]:
+    """Shared OpenAI-compatible client for SiliconFlow; None when no key is set."""
+    global _client
+    if not settings.EMBEDDING_API_KEY:  # None or empty string both mean "no embeddings"
+        return None
+    if _client is None:
+        _client = OpenAI(
+            api_key=settings.EMBEDDING_API_KEY,
+            base_url=settings.EMBEDDING_BASE_URL,
+        )
+    return _client
+
 
 class VectorStore:
-    BATCH_SIZE = 90  # texts per embedding request (API caps batch sizes)
+    BATCH_SIZE = 32  # texts per embedding request (bge-m3 caps ~8k tokens/line)
 
     def __init__(self, session: Session):
         self.session = session
-        self.model = settings.EMBEDDING_MODEL  # gemini-embedding-001, pinned to 768 dims below
-
-    def _get_embedding(self, text: str) -> List[float]:
-        """Generates a 768-dimensional embedding using Gemini."""
-        result = genai.embed_content(
-            model=self.model,
-            content=text,
-            task_type="retrieval_query",
-            output_dimensionality=768
-        )
-        return result['embedding']
+        self.model = settings.EMBEDDING_MODEL  # BAAI/bge-m3, fixed 1024 dims
 
     def get_relevant_chunks(
-        self, 
-        query: str, 
-        document_id: int, 
+        self,
+        query: str,
+        document_id: int,
         top_k: int = 3
     ) -> List[DocumentChunk]:
         """
         Performs a cosine similarity search within a specific document.
+        Returns [] when embeddings are unavailable (no API key or embed failure).
         """
-        # 1. Embed the user query
-        query_vector = self._get_embedding(query)
+        query_vector = self._query_embedding(query)
+        if query_vector is None:
+            return []
 
-        # 2. Query pgvector using Cosine Distance (<=> operator)
         # Cosine Distance = 1 - Cosine Similarity. Smaller is better.
         stmt = (
             select(DocumentChunk)
@@ -100,16 +104,30 @@ class VectorStore:
         print(f"Embedded {embedded}/{total} chunks", flush=True)
         return embedded
 
+    def _query_embedding(self, text: str) -> Optional[List[float]]:
+        """Embeds a search query; None if embeddings are unavailable."""
+        if _get_client() is None:
+            print("No embedding API key configured; vector search disabled", flush=True)
+            return None
+        try:
+            return self._embed_batch([text])[0]
+        except Exception as error:
+            print(f"Query embedding failed ({error}); vector search disabled", flush=True)
+            return None
+
     def _embed_batch(self, texts: List[str], attempts: int = 4) -> List[List[float]]:
+        client = _get_client()
+        if client is None:
+            raise RuntimeError("EMBEDDING_API_KEY (SILICONFLOW_API_KEY) is not set")
         for attempt in range(attempts):
             try:
-                result = genai.embed_content(
+                # NOTE: do not send `dimensions` — fixed-width models like
+                # bge-m3 (native 1024) reject that parameter with HTTP 400.
+                response = client.embeddings.create(
                     model=self.model,
-                    content=texts,
-                    task_type="retrieval_document",
-                    output_dimensionality=768
+                    input=texts,
                 )
-                return result['embedding']
+                return [item.embedding for item in response.data]
             except Exception as error:
                 if attempt == attempts - 1:
                     raise
