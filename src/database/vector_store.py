@@ -75,6 +75,8 @@ class VectorStore:
             )
         self.session.add_all(new_chunks)
         self.session.commit()
+        note = " (capped at MAX_EMBED_CHUNKS)" if len(text_chunks) == settings.MAX_EMBED_CHUNKS else ""
+        print(f"Embedded {len(text_chunks)}/{len(text_chunks)} chunks{note}", flush=True)
 
     def _embed_batch(self, texts: List[str], attempts: int = 4) -> List[List[float]]:
         for attempt in range(attempts):

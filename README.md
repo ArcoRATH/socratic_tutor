@@ -35,6 +35,7 @@ An AI-driven learning system that turns text-based PDFs — from short papers to
 | `/start` | Welcome + how to use the bot |
 | `/style` | List teaching styles / show current |
 | `/style ELI5` | Switch teaching style (applies next lesson) |
+| `/status` | Show the latest document and your live session |
 | `/reset` | Abandon the current lesson and start fresh |
 
 Uploading a new PDF always resets the session automatically.

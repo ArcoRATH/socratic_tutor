@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.core.config import settings
 from src.core.constants import DEFAULT_STYLE, PEDAGOGICAL_PROMPTS
 from src.database.connections import SessionLocal, init_db
-from src.database.models import Document
+from src.database.models import Document, DocumentChunk
 from src.database.vector_store import VectorStore
 from src.engine.extractor import DocumentExtractor
 from src.engine.filter import select_content_chunks
@@ -82,6 +82,7 @@ def _looks_text_based(chunks, min_chars: int = 200) -> bool:
 
 def _store_document(safe_name: str, raw_chunks, content_chunks, user_id) -> int:
     """Sync DB/embedding pipeline — runs in a worker thread via asyncio.to_thread."""
+    capped = content_chunks[: settings.MAX_EMBED_CHUNKS]
     with SessionLocal() as db:
         document = Document(
             title=safe_name,
@@ -92,11 +93,11 @@ def _store_document(safe_name: str, raw_chunks, content_chunks, user_id) -> int:
         db.commit()
         db.refresh(document)
 
-        VectorStore(db).add_chunks(document.id, content_chunks)
+        VectorStore(db).add_chunks(document.id, capped)
 
         state = build_initial_state()
         state["document_id"] = document.id
-        state["total_chunks"] = len(content_chunks)
+        state["total_chunks"] = len(capped)
         LearningMiddleware(db).save_context(user_id, state)
         return document.id
 
@@ -110,6 +111,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "by section — explaining, quizzing, and tracking how well each idea sticks.\n\n"
         "Commands:\n"
         "/style — choose how I explain things\n"
+        "/status — show the latest document and your live session\n"
         "/reset — abandon the current lesson and start fresh",
     )
 
@@ -170,9 +172,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minutes = max(1, sum(len(chunk.split()) for chunk in content_chunks) // 150)
     skipped = selection["front"] + selection["back"] + selection["heuristic_dropped"]
     skipped_note = f" (skipped {skipped} non-content sections: TOC, preface, index, …)" if skipped else ""
+    capped_note = ""
+    if len(content_chunks) > settings.MAX_EMBED_CHUNKS:
+        capped_note = (
+            f"\nThat's more than I can fit in one session — this pass covers the first "
+            f"{settings.MAX_EMBED_CHUNKS} sections."
+        )
     await _reply(
         update,
-        f'I broke "{safe_name}" into {len(content_chunks)} lesson section(s){skipped_note} — about {minutes} min of study.\n'
+        f'I broke "{safe_name}" into {len(content_chunks)} lesson section(s){skipped_note} — about {minutes} min of study.'
+        f"{capped_note}\n"
         "Send any message to start lesson 1.",
     )
 
@@ -204,7 +213,7 @@ async def style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with SessionLocal() as db:
             current = LearningMiddleware(db).load_context(user_id).get("pedagogical_style", DEFAULT_STYLE)
         options = "\n".join(f"/style {name}" for name in PEDAGOGICAL_PROMPTS)
-        await _reply(update, f"Current teaching style: <b>{current}</b>\n\n{options}\n\nApplies from your next lesson.")
+        await _reply(update, f"Current teaching style: **{current}**\n\n{options}\n\nApplies from your next lesson.")
         return
 
     choice = args[0].strip().upper()
@@ -219,7 +228,7 @@ async def style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["pedagogical_style"] = choice
         middleware.save_context(user_id, state)
 
-    await _reply(update, f"Teaching style set to <b>{choice}</b> — applies from your next lesson.")
+    await _reply(update, f"Teaching style set to **{choice}** — applies from your next lesson.")
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,12 +239,46 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _reply(update, "Session cleared. Upload a PDF to start a new lesson.")
 
 
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the latest ingestion and the caller's live session state."""
+    lines = []
+    with SessionLocal() as db:
+        document = db.query(Document).order_by(Document.id.desc()).first()
+        if document is None:
+            lines.append("No documents ingested yet — upload a PDF to begin.")
+        else:
+            embedded = (
+                db.query(DocumentChunk)
+                .filter(DocumentChunk.document_id == document.id)
+                .count()
+            )
+            capped = embedded >= settings.MAX_EMBED_CHUNKS
+            lines.append(
+                f"**Latest document**: {document.title} (id {document.id})\n"
+                f"Sections embedded: **{embedded}**{' / capped' if capped else ''}"
+            )
+
+        state = LearningMiddleware(db).load_context(update.effective_user.id)
+        total = state.get("total_chunks") or 0
+        index = state.get("current_chunk_index") or 0
+        if state.get("document_id") and total:
+            lines.append(
+                f"**Your session**: document {state['document_id']}, "
+                f"section **{index + 1}/{total}** (next up)"
+            )
+        else:
+            lines.append("No active session — upload a PDF or send a message to start.")
+
+    await _reply(update, "\n\n".join(lines))
+
+
 def main():
     init_db()
     application = ApplicationBuilder().token(settings.TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('reset', reset))
+    application.add_handler(CommandHandler('status', status))
     application.add_handler(CommandHandler('style', style))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
