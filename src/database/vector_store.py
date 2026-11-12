@@ -44,7 +44,10 @@ class VectorStore:
         # Cosine Distance = 1 - Cosine Similarity. Smaller is better.
         stmt = (
             select(DocumentChunk)
-            .filter(DocumentChunk.document_id == document_id)
+            .filter(
+                DocumentChunk.document_id == document_id,
+                DocumentChunk.embedding.is_not(None),
+            )
             .order_by(DocumentChunk.embedding.cosine_distance(query_vector))
             .limit(top_k)
         )
@@ -52,31 +55,50 @@ class VectorStore:
         results = self.session.execute(stmt).scalars().all()
         return list(results)
 
-    def add_chunks(self, document_id: int, text_chunks: List[str]):
+    def add_chunks(
+        self,
+        document_id: int,
+        text_chunks: List[str],
+        embed_limit: Optional[int] = None,
+    ) -> int:
         """
-        Embeds and stores multiple chunks for a new document.
-        Batches requests and retries on rate limits so full-length books work.
+        Stores every chunk for a new document, embedding only the first
+        `embed_limit` chunks. Embedding is a quota-bounded extra: on failure
+        the remaining chunks are stored with a NULL embedding and stay teachable.
         """
-        new_chunks = []
-        total_batches = (len(text_chunks) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
-        for start in range(0, len(text_chunks), self.BATCH_SIZE):
+        total = len(text_chunks)
+        embed_limit = total if embed_limit is None else min(embed_limit, total)
+        embeddings: List[Optional[List[float]]] = [None] * total
+        embedded = 0
+
+        total_batches = (embed_limit + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+        for start in range(0, embed_limit, self.BATCH_SIZE):
+            batch = text_chunks[start:min(start + self.BATCH_SIZE, embed_limit)]
             print(f"Embedding batch {start // self.BATCH_SIZE + 1}/{total_batches} "
-                  f"({len(text_chunks[start:start + self.BATCH_SIZE])} chunks)", flush=True)
-            batch = text_chunks[start:start + self.BATCH_SIZE]
-            embeddings = self._embed_batch(batch)
-            new_chunks.extend(
-                DocumentChunk(
-                    document_id=document_id,
-                    content=text,
-                    chunk_index=start + i,
-                    embedding=embedding,
-                )
-                for i, (text, embedding) in enumerate(zip(batch, embeddings))
+                  f"({len(batch)} chunks)", flush=True)
+            try:
+                batch_embeddings = self._embed_batch(batch)
+            except Exception as error:
+                print(f"Embedding failed at batch {start // self.BATCH_SIZE + 1}/{total_batches} "
+                      f"({error}); storing remaining chunks unembedded", flush=True)
+                break
+            for i, embedding in enumerate(batch_embeddings):
+                embeddings[start + i] = embedding
+            embedded += len(batch_embeddings)
+
+        new_chunks = [
+            DocumentChunk(
+                document_id=document_id,
+                content=text,
+                chunk_index=index,
+                embedding=embeddings[index],
             )
+            for index, text in enumerate(text_chunks)
+        ]
         self.session.add_all(new_chunks)
         self.session.commit()
-        note = " (capped at MAX_EMBED_CHUNKS)" if len(text_chunks) == settings.MAX_EMBED_CHUNKS else ""
-        print(f"Embedded {len(text_chunks)}/{len(text_chunks)} chunks{note}", flush=True)
+        print(f"Embedded {embedded}/{total} chunks", flush=True)
+        return embedded
 
     def _embed_batch(self, texts: List[str], attempts: int = 4) -> List[List[float]]:
         for attempt in range(attempts):

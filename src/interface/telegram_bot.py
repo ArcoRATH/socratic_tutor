@@ -80,9 +80,8 @@ def _looks_text_based(chunks, min_chars: int = 200) -> bool:
     return sum(len(chunk) for chunk in chunks) >= min_chars
 
 
-def _store_document(safe_name: str, raw_chunks, content_chunks, user_id) -> int:
+def _store_document(safe_name: str, raw_chunks, content_chunks, user_id):
     """Sync DB/embedding pipeline — runs in a worker thread via asyncio.to_thread."""
-    capped = content_chunks[: settings.MAX_EMBED_CHUNKS]
     with SessionLocal() as db:
         document = Document(
             title=safe_name,
@@ -93,13 +92,15 @@ def _store_document(safe_name: str, raw_chunks, content_chunks, user_id) -> int:
         db.commit()
         db.refresh(document)
 
-        VectorStore(db).add_chunks(document.id, capped)
+        embedded = VectorStore(db).add_chunks(
+            document.id, content_chunks, embed_limit=settings.MAX_EMBED_CHUNKS
+        )
 
         state = build_initial_state()
         state["document_id"] = document.id
-        state["total_chunks"] = len(capped)
+        state["total_chunks"] = len(content_chunks)
         LearningMiddleware(db).save_context(user_id, state)
-        return document.id
+        return document.id, embedded, len(content_chunks)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -161,10 +162,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reply(update, "I extracted text but couldn't identify teachable content in this PDF. Try another file.")
         return
 
-    await _reply(update, f"Found {len(content_chunks)} lesson sections. Embedding them now — big books take a minute or two…")
+    await _reply(update, f"Found {len(content_chunks)} lesson sections. Storing them and embedding what I can…")
 
     try:
-        await asyncio.to_thread(_store_document, safe_name, chunks, content_chunks, user_id)
+        _, embedded, total = await asyncio.to_thread(_store_document, safe_name, chunks, content_chunks, user_id)
     except Exception as error:
         await _reply(update, f"I couldn't store that PDF: {error}")
         return
@@ -172,16 +173,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minutes = max(1, sum(len(chunk.split()) for chunk in content_chunks) // 150)
     skipped = selection["front"] + selection["back"] + selection["heuristic_dropped"]
     skipped_note = f" (skipped {skipped} non-content sections: TOC, preface, index, …)" if skipped else ""
-    capped_note = ""
-    if len(content_chunks) > settings.MAX_EMBED_CHUNKS:
-        capped_note = (
-            f"\nThat's more than I can fit in one session — this pass covers the first "
-            f"{settings.MAX_EMBED_CHUNKS} sections."
-        )
+    embed_note = ""
+    if embedded < total:
+        embed_note = f" I embedded {embedded}/{total} sections for search — every section is still teachable."
     await _reply(
         update,
-        f'I broke "{safe_name}" into {len(content_chunks)} lesson section(s){skipped_note} — about {minutes} min of study.'
-        f"{capped_note}\n"
+        f'I broke "{safe_name}" into {total} lesson section(s){skipped_note} — about {minutes} min of study.'
+        f"{embed_note}\n"
         "Send any message to start lesson 1.",
     )
 
@@ -247,16 +245,25 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if document is None:
             lines.append("No documents ingested yet — upload a PDF to begin.")
         else:
-            embedded = (
+            total = (
                 db.query(DocumentChunk)
                 .filter(DocumentChunk.document_id == document.id)
                 .count()
             )
-            capped = embedded >= settings.MAX_EMBED_CHUNKS
+            embedded = (
+                db.query(DocumentChunk)
+                .filter(
+                    DocumentChunk.document_id == document.id,
+                    DocumentChunk.embedding.is_not(None),
+                )
+                .count()
+            )
             lines.append(
                 f"**Latest document**: {document.title} (id {document.id})\n"
-                f"Sections embedded: **{embedded}**{' / capped' if capped else ''}"
+                f"Sections: **{total}** (embedded: **{embedded}**)"
             )
+            if embedded < total:
+                lines.append("Embedding incomplete — all sections are still teachable.")
 
         state = LearningMiddleware(db).load_context(update.effective_user.id)
         total = state.get("total_chunks") or 0

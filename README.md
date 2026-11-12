@@ -20,7 +20,7 @@ An AI-driven learning system that turns text-based PDFs — from short papers to
 
 ## ✨ Key Features
 
-- **📚 Book-Scale Ingestion:** Kreuzberg v4 extraction + size-based chunking — no per-sentence embedding calls, so a 500-page book ingests in seconds (chunking) and ~a minute (embeddings, batched with rate-limit backoff).
+- **📚 Book-Scale Ingestion:** Kreuzberg v4 extraction + size-based chunking. Every section is stored and teachable; embeddings are attempted for the first `MAX_EMBED_CHUNKS` and the rest are stored unembedded, so a 500-page book never blows the embedding quota.
 - **🧹 Front/Back Matter Filter:** char-weighted heuristics + a cheap LLM classification pass keep only teachable content. Degrades gracefully: if the LLM is unavailable, everything is kept and the book still works.
 - **🤖 Stateful Learning Flow:** LangGraph orchestrates retrieve → teach → challenge → evaluate with mastery-gated routing (`MASTERY_THRESHOLD = 0.85`, `MAX_RETRIES = 3`).
 - **📈 Mastery Tracking:** per-concept mastery score (`M_new = M_old + ((1 − M_old) × accuracy) / (1 + attempts)`), attempts, and struggle points in PostgreSQL.
@@ -91,6 +91,7 @@ The app container runs `src/main.py` → `init_db()` (creates the pgvector exten
 | `LLM_MODEL` | `gemini-3.5-flash` | Teaching/eval model (verified on free tier; JSON mode included) |
 | `EMBEDDING_MODEL` | `models/gemini-embedding-001` | Embedding model, pinned to 768 dims (must match `Vector(768)` in `models.py`) |
 | `DATABASE_URL` | points at `db` container | Postgres connection |
+| `MAX_EMBED_CHUNKS` | `30` | Max sections to embed per document; the rest are stored unembedded and remain teachable |
 | `LOG_LEVEL` / `DEBUG` | `INFO` / `False` | App settings |
 
 ---

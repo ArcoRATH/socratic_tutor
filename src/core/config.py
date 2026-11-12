@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # App Settings
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
-    MAX_EMBED_CHUNKS: int = Field(30)
+    MAX_EMBED_CHUNKS: int = Field(30, description="Max sections to embed per document; the rest are stored unembedded and remain teachable")
 
     # Pydantic configuration to read from .env
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
